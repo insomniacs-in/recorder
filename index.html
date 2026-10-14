@@ -47,6 +47,8 @@
   .transcript:empty::before { content:'What you say shows here, and goes into the form as you speak.'; color:var(--muted); }
   .transcript .now { color:var(--muted); }
   audio { width:100%; }
+  .meter { height:10px; border-radius:6px; background:var(--bg); border:1px solid var(--line); overflow:hidden; }
+  .meter i { display:block; height:100%; width:0; background:var(--good); transition:width .08s linear; }
   .msg { font-size:13px; padding:10px 12px; border-radius:10px; background:var(--red-soft); }
   .msg.good { background:transparent; color:var(--good); padding:0; }
   [hidden] { display:none !important; }
@@ -66,7 +68,11 @@
       <option value="en-US">English (US)</option>
       <option value="en-GB">English (UK)</option>
     </select>
+    <label class="muted" for="mic" hidden>Microphone</label>
+    <select id="mic" hidden></select>
     <button class="big primary" id="go">🎤 Start</button>
+    <div class="meter" id="meter" hidden><i id="level"></i></div>
+    <p class="muted" id="meterHint" hidden>The bar moves when it hears you. If it stays still while you speak, choose another microphone above.</p>
     <div class="transcript" id="text" hidden></div>
     <audio id="play" controls hidden></audio>
     <div class="row" id="after" hidden>
@@ -109,6 +115,7 @@
     $('go').textContent = mode === 'record' ? '🎙 Start recording' : '🎤 Start';
     $('text').hidden = mode === 'record';
     $('copy').hidden = mode === 'record'; $('save').hidden = mode !== 'record';
+    if (mode === 'record') listMics();  // the microphones (their names show once the microphone was allowed here before)
   }
 
   // The portal answers "ready" with what to do. Asked a few times, in case the portal window was still busy.
@@ -177,18 +184,64 @@
   }
 
   // ── a voice note ──
-  var media = null, stream = null, parts = [], blob = null, timer = 0, began = 0;
+  // Clear speech (2026-10-14, "the recorder is not recording my voice properly"): the microphone you choose (laptops often have more
+  // than one, and the browser may take a quiet one), the browser's level control and noise removal on but not its echo removal (it
+  // can cut a voice in and out), one channel, and good quality (AAC, which plays everywhere including Google Drive, where the browser
+  // can; else Opus). A level bar shows it hears you; silence for the first seconds says so.
+  var media = null, stream = null, parts = [], blob = null, timer = 0, began = 0, loudest = 0;
+  var store = { get: function (k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
+    set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+  function listMics() {
+    if (!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices)) return;
+    navigator.mediaDevices.enumerateDevices().then(function (all) {
+      var mics = all.filter(function (d) { return d.kind === 'audioinput' && d.deviceId; });
+      var sel = $('mic'), chosen = store.get('ins.mic');
+      sel.innerHTML = '';
+      mics.forEach(function (d, i) { var o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || 'Microphone ' + (i + 1); sel.appendChild(o); });
+      if (chosen && mics.some(function (d) { return d.deviceId === chosen; })) sel.value = chosen;
+      sel.hidden = sel.previousElementSibling.hidden = mics.length < 2 || mode !== 'record';
+    }).catch(function () {});
+  }
+  $('mic').onchange = function () { store.set('ins.mic', $('mic').value); };
+  function meter(s) {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    var ac = new Ctx(), an = ac.createAnalyser(), buf;
+    an.fftSize = 512; buf = new Uint8Array(an.fftSize);
+    ac.createMediaStreamSource(s).connect(an);
+    $('meter').hidden = false; $('meterHint').hidden = false;
+    (function draw() {
+      if (!media || media.state !== 'recording') { $('level').style.width = '0'; try { ac.close(); } catch (e) {} return; }
+      an.getByteTimeDomainData(buf);
+      var peak = 0;
+      for (var i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+      loudest = Math.max(loudest, peak);
+      $('level').style.width = Math.min(100, peak / 128 * 220) + '%';
+      requestAnimationFrame(draw);
+    })();
+  }
   function record() {
     if (media && media.state === 'recording') return media.stop();
     if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) return say('This browser can\'t record here. Use the voice recorder on your phone and "Upload a recording" in the form.');
     say('');
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
-      stream = s; parts = []; blob = null;
-      var type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].filter(function (t) { return MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t); })[0] || '';
-      media = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 32000 } : undefined);
+    var chosen = $('mic').value || store.get('ins.mic');
+    var audio = { channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true };
+    if (chosen) audio.deviceId = { exact: chosen };
+    navigator.mediaDevices.getUserMedia({ audio: audio }).catch(function () {
+      return navigator.mediaDevices.getUserMedia({ audio: true });  // that microphone is gone, or the settings aren't supported
+    }).then(function (s) {
+      stream = s; parts = []; blob = null; loudest = 0;
+      listMics();  // their names show once the microphone is allowed
+      var type = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+        .filter(function (t) { return MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t); })[0] || '';
+      media = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 96000 } : undefined);
       media.ondataavailable = function (e) { if (e.data && e.data.size) parts.push(e.data); };
+      setTimeout(function () {
+        if (media && media.state === 'recording' && loudest < 4) say('It can\'t hear you: check the microphone isn\'t muted, or choose another one above, then record again.');
+      }, 4000);
       media.onstop = function () {
         clearInterval(timer); stream.getTracks().forEach(function (t) { t.stop(); });
+        $('meter').hidden = true; $('meterHint').hidden = true;
         blob = new Blob(parts, { type: (media.mimeType || type || 'audio/webm').split(';')[0] });
         $('go').classList.remove('on'); $('go').hidden = true;
         $('play').src = URL.createObjectURL(blob); $('play').hidden = false;
@@ -196,6 +249,7 @@
         say(target ? 'Listen to it if you like, then press "Use this recording".' : '', true);
       };
       media.start(1000); began = Date.now();
+      meter(stream);
       $('go').classList.add('on'); $('go').textContent = 'Stop · 0:00';
       timer = setInterval(function () {
         var t = Math.floor((Date.now() - began) / 1000);
