@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Insomniacs Portal – Recorder</title>
+<!--
+  The microphone page for the Insomniacs Portal's feedback form (2026-10-14).
+  Google runs the portal inside its own frame, which doesn't let pages use the microphone, so the browser never even asks. The portal
+  opens this page in a small window instead: it is a normal page, so the browser asks "Allow microphone?" here. What is said (speak to
+  type) or recorded (a voice note) goes straight back to the portal window that opened it, and nowhere else: this page keeps nothing
+  and sends nothing to any server.
+  Host this one file anywhere outside Google Apps Script (GitHub Pages, or the company website) and put its address in the Settings tab
+  of the portal's data Sheet, row recorder_page. See the README, "Speak to type and voice notes".
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0e0e11; --card:#16161b; --ink:#ececf1; --muted:#9d9daa; --line:#2b2b33; --red:#E93735; --red-soft:rgba(233,55,53,.17); --good:#3ccb88; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f4f6; --card:#ffffff; --ink:#0c0c0c; --muted:#6b6b76; --line:#e5e5ea; --red-soft:#fdeceb; --good:#178a5c; }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; min-height:100%; }
+  body { background:var(--bg); color:var(--ink); font:15px/1.45 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; display:flex; justify-content:center; padding:18px 16px; }
+  main { width:100%; max-width:440px; display:flex; flex-direction:column; gap:14px; }
+  .brand { font-weight:700; font-size:14px; letter-spacing:.01em; }
+  .brand span { color:var(--red); }
+  .brand i { font-style:normal; font-weight:400; color:var(--muted); }
+  h1 { margin:0; font-size:22px; }
+  p { margin:0; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  button, select { font:inherit; color:inherit; }
+  button { cursor:pointer; border:1px solid var(--line); background:var(--card); border-radius:10px; padding:10px 16px; font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  .primary { background:var(--red); border-color:var(--red); color:#fff; }
+  .big { width:100%; padding:16px; font-size:17px; border-radius:12px; }
+  .big.on { background:var(--red-soft); border-color:var(--red); color:var(--red); }
+  .big.on::before { content:''; display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--red); margin-right:8px; animation:blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.25; } }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex:1; }
+  select { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:10px; background:var(--bg); }
+  .transcript { min-height:110px; max-height:40vh; overflow:auto; padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); white-space:pre-wrap; }
+  .transcript:empty::before { content:'What you say shows here, and goes into the form as you speak.'; color:var(--muted); }
+  .transcript .now { color:var(--muted); }
+  audio { width:100%; }
+  .msg { font-size:13px; padding:10px 12px; border-radius:10px; background:var(--red-soft); }
+  .msg.good { background:transparent; color:var(--good); padding:0; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">insomniacs<span>.</span> <i>Portal</i></div>
+  <h1 id="title">Speak to type</h1>
+  <p class="muted" id="lead">Press Start and allow the microphone when the browser asks.</p>
+
+  <div class="card">
+    <label class="muted" for="lang">Language</label>
+    <select id="lang">
+      <option value="en-IN">English (India)</option>
+      <option value="hi-IN">Hindi</option>
+      <option value="en-US">English (US)</option>
+      <option value="en-GB">English (UK)</option>
+    </select>
+    <button class="big primary" id="go">🎤 Start</button>
+    <div class="transcript" id="text" hidden></div>
+    <audio id="play" controls hidden></audio>
+    <div class="row" id="after" hidden>
+      <button id="again">Record again</button>
+      <button class="primary" id="use">Use this recording</button>
+    </div>
+    <div class="row" id="manual" hidden>
+      <button id="copy">Copy the text</button>
+      <a id="download" hidden></a>
+      <button id="save">Save the recording</button>
+    </div>
+    <p class="msg" id="msg" hidden></p>
+  </div>
+  <p class="muted" id="foot">This page only listens while you record. What you say goes straight into the portal's feedback form and nowhere else.</p>
+</main>
+<script>
+(function () {
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  var mode = params.get('mode') === 'record' ? 'record' : 'speak';
+  var target = '';  // the portal window's address, from its first message: replies go only there
+  var MAX = 300;    // seconds a voice note may last
+  var $ = function (id) { return document.getElementById(id); };
+  var opener = window.opener;
+
+  // Only the portal (Google Apps Script pages run on *.googleusercontent.com), or a test copy on this computer
+  function portalOrigin(o) {
+    return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.googleusercontent\.com$/.test(o) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o);
+  }
+  function send(message) { if (opener && !opener.closed && target) opener.postMessage(message, target); }
+  function say(text, good) { var m = $('msg'); m.textContent = text; m.className = 'msg' + (good ? ' good' : ''); m.hidden = !text; }
+
+  function show() {
+    document.title = (mode === 'record' ? 'Voice note' : 'Speak to type') + ' – Insomniacs Portal';
+    $('title').textContent = mode === 'record' ? 'Record a voice note' : 'Speak to type';
+    $('lead').textContent = mode === 'record'
+      ? 'A short brief about the meeting, up to 5 minutes. Press Start and allow the microphone when the browser asks.'
+      : 'Press Start, allow the microphone when the browser asks, and speak. The words go into the form as you speak.';
+    $('lang').hidden = mode === 'record'; $('lang').previousElementSibling.hidden = mode === 'record';
+    $('go').textContent = mode === 'record' ? '🎙 Start recording' : '🎤 Start';
+    $('text').hidden = mode === 'record';
+    $('copy').hidden = mode === 'record'; $('save').hidden = mode !== 'record';
+  }
+
+  // The portal answers "ready" with what to do. Asked a few times, in case the portal window was still busy.
+  window.addEventListener('message', function (e) {
+    if (!opener || e.source !== opener || !portalOrigin(e.origin)) return;
+    var d = e.data || {};
+    if (d.type !== 'ins-recorder-start') return;
+    target = e.origin;
+    mode = d.mode === 'record' ? 'record' : 'speak';
+    if (d.lang && $('lang').querySelector('option[value="' + d.lang + '"]')) $('lang').value = d.lang;
+    if (d.maxSeconds) MAX = Math.max(10, Math.min(600, Number(d.maxSeconds) || MAX));
+    show();
+  });
+  var asks = 0;
+  (function ready() {
+    if (target || !opener || asks++ > 20) return;
+    opener.postMessage({ type: 'ins-recorder-ready' }, '*');  // nothing in it: just "I'm here"
+    setTimeout(ready, 400);
+  })();
+  show();
+  if (!opener) {
+    $('manual').hidden = false;
+    say('Open this from the portal\'s feedback form to have it fill the form by itself. You can still use it here, then copy the text or save the recording and upload it in the form.');
+  }
+  window.addEventListener('pagehide', function () { stopAll(); send({ type: 'ins-recorder-closed' }); });
+
+  // ── speak to type ──
+  var Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var rec = null, listening = false, finalText = '';
+  function speak() {
+    if (listening) { listening = false; if (rec) rec.stop(); return; }
+    if (!Speech) return say('This browser can\'t turn speech into text. Open the portal in Chrome or Edge, or use the mic on your phone\'s keyboard.');
+    say('');
+    listening = true;
+    $('go').classList.add('on'); $('go').textContent = 'Listening… press to finish';
+    $('text').hidden = false;
+    var startAt = finalText;
+    var run = function () {
+      rec = new Speech();
+      rec.lang = $('lang').value; rec.continuous = true; rec.interimResults = true;
+      rec.onresult = function (e) {
+        var done = '', now = '';
+        for (var i = 0; i < e.results.length; i++) { if (e.results[i].isFinal) done += e.results[i][0].transcript + ' '; else now += e.results[i][0].transcript; }
+        var all = (startAt + ' ' + done).replace(/\s+/g, ' ').trim();
+        $('text').innerHTML = '';
+        $('text').appendChild(document.createTextNode(all + (now ? ' ' : '')));
+        if (now) { var s = document.createElement('span'); s.className = 'now'; s.textContent = now; $('text').appendChild(s); }
+        finalText = all;
+        send({ type: 'ins-recorder-text', text: (all + ' ' + now).trim(), final: false });
+      };
+      rec.onerror = function (e) {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          listening = false;
+          say('The microphone is blocked for this page. Click the icon at the left of the address bar, set Microphone to Allow, and press Start again.');
+        } else if (e.error !== 'no-speech' && e.error !== 'aborted') say('Speech to text stopped (' + e.error + '). Press Start to go on.');
+      };
+      rec.onend = function () {
+        if (listening) { startAt = finalText; return run(); }  // the browser stops after a pause: go on until you press to finish
+        $('go').classList.remove('on'); $('go').textContent = '🎤 Start again';
+        if (finalText) { send({ type: 'ins-recorder-text', text: finalText, final: true }); say(target ? 'Done: the text is in the form. You can close this window.' : '', true); }
+        if (target && finalText) setTimeout(function () { window.close(); }, 1200);
+      };
+      try { rec.start(); } catch (err) { listening = false; say('Could not start: ' + err.message); }
+    };
+    run();
+  }
+
+  // ── a voice note ──
+  var media = null, stream = null, parts = [], blob = null, timer = 0, began = 0;
+  function record() {
+    if (media && media.state === 'recording') return media.stop();
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) return say('This browser can\'t record here. Use the voice recorder on your phone and "Upload a recording" in the form.');
+    say('');
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      stream = s; parts = []; blob = null;
+      var type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].filter(function (t) { return MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t); })[0] || '';
+      media = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 32000 } : undefined);
+      media.ondataavailable = function (e) { if (e.data && e.data.size) parts.push(e.data); };
+      media.onstop = function () {
+        clearInterval(timer); stream.getTracks().forEach(function (t) { t.stop(); });
+        blob = new Blob(parts, { type: (media.mimeType || type || 'audio/webm').split(';')[0] });
+        $('go').classList.remove('on'); $('go').hidden = true;
+        $('play').src = URL.createObjectURL(blob); $('play').hidden = false;
+        $('after').hidden = !target; $('manual').hidden = !!target;
+        say(target ? 'Listen to it if you like, then press "Use this recording".' : '', true);
+      };
+      media.start(1000); began = Date.now();
+      $('go').classList.add('on'); $('go').textContent = 'Stop · 0:00';
+      timer = setInterval(function () {
+        var t = Math.floor((Date.now() - began) / 1000);
+        $('go').textContent = 'Stop · ' + Math.floor(t / 60) + ':' + ('0' + t % 60).slice(-2);
+        if (t >= MAX) media.stop();
+      }, 500);
+    }).catch(function () {
+      say('The microphone is blocked for this page. Click the icon at the left of the address bar, set Microphone to Allow, and press Start again.');
+    });
+  }
+  function stopAll() {
+    listening = false;
+    try { if (rec) rec.stop(); } catch (e) {}
+    try { if (media && media.state === 'recording') media.stop(); } catch (e) {}
+  }
+
+  $('go').onclick = function () { if (mode === 'record') record(); else speak(); };
+  $('again').onclick = function () {
+    $('play').hidden = true; $('after').hidden = true; $('go').hidden = false; $('go').textContent = '🎙 Start recording'; say(''); record();
+  };
+  $('use').onclick = function () {
+    if (!blob) return;
+    send({ type: 'ins-recorder-audio', blob: blob, mime: blob.type });
+    say('Done: the voice note is in the form. You can close this window.', true);
+    setTimeout(function () { window.close(); }, 1200);
+  };
+  $('copy').onclick = function () {
+    var t = finalText || $('text').textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(t).then(function () { say('Copied: paste it into the form.', true); });
+  };
+  $('save').onclick = function () {
+    if (!blob) return say('Record something first.');
+    var a = $('download');
+    a.href = URL.createObjectURL(blob); a.download = 'voice-note.' + (/mp4/.test(blob.type) ? 'm4a' : /ogg/.test(blob.type) ? 'ogg' : 'webm');
+    a.click();
+  };
+})();
+</script>
+</body>
+</html>
